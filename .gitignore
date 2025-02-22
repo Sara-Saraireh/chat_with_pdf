@@ -1,0 +1,10 @@
+# Ignore environment files
+.env
+
+# Ignore API keys stored in Python files
+config.py
+secrets.json
+
+# Ignore cache and system files
+__pycache__/
+*.log
