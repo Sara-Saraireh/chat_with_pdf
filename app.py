@@ -1,35 +1,78 @@
-import os
 import streamlit as st
-from langchain.llms import HuggingFaceHub
+from langchain_community.document_loaders import PDFPlumberLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_ollama import OllamaEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama.llms import OllamaLLM
+from langchain_core.documents import Document
 
-# Load Hugging Face API token securely
-hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+template = """
+You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
+Question: {question} 
+Context: {context} 
+Answer:
+"""
 
-# Handle missing API key
-if hf_token is None:
-    st.error("❌ Hugging Face API token is missing! Set it in Streamlit Secrets or GitHub Secrets.")
-    st.stop()
+pdfs_directory = 'chat-with-pdf/pdfs/'
 
-# Initialize LLM
-llm = HuggingFaceHub(
-    repo_id="mistralai/Mistral-7B-Instruct-v0.1",  # Free LLM
-    model_kwargs={"temperature": 0.7, "max_new_tokens": 256},
-    huggingfacehub_api_token=hf_token
+embeddings = OllamaEmbeddings(model="deepseek-r1:1.5b")
+vector_store = None  # Initialize as None, will be updated later
+
+model = OllamaLLM(model="deepseek-r1:1.5b")
+
+def upload_pdf(file):
+    with open(pdfs_directory + file.name, "wb") as f:
+        f.write(file.getbuffer())
+
+def load_pdf(file_path):
+    loader = PDFPlumberLoader(file_path)
+    return loader.load()
+
+def split_text(documents):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        add_start_index=True
+    )
+    return text_splitter.split_documents(documents)
+
+def index_docs(documents):
+    global vector_store
+    texts = [doc.page_content for doc in documents]
+    metadatas = [{"source": doc.metadata.get("source", "")} for doc in documents]
+
+    if texts:  # Ensure there's text to embed
+        vector_store = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
+    else:
+        st.warning("No text found to index.")
+
+
+def retrieve_docs(query):
+    return vector_store.similarity_search(query, k=5)
+
+def answer_question(question, documents):
+    context = "\n\n".join([doc.page_content for doc in documents])
+    prompt = ChatPromptTemplate.from_template(template)
+    chain = prompt | model
+
+    return chain.invoke({"question": question, "context": context})
+
+uploaded_file = st.file_uploader(
+    "Upload PDF",
+    type="pdf",
+    accept_multiple_files=False
 )
 
-# Streamlit UI
-st.set_page_config(page_title="Free LLM Chatbot", page_icon="🤖")
-st.title("🤖 Free AI Chatbot with Hugging Face")
+if uploaded_file:
+    upload_pdf(uploaded_file)
+    documents = load_pdf(pdfs_directory + uploaded_file.name)
+    chunked_documents = split_text(documents)
+    index_docs(chunked_documents)
 
-st.markdown("### Ask me anything! (Powered by Mistral-7B)")
-user_input = st.text_input("Your Question:", placeholder="Type here...")
-
-if user_input:
-    with st.spinner("Thinking... 💭"):
-        response = llm(user_input)
-    st.success("✅ Answer:")
-    st.write(response)
-
-# Footer
-st.markdown("---")
-st.markdown("💡 *Powered by Hugging Face & LangChain | Made with ❤️ in Streamlit*")
+    question = st.chat_input()
+    if question:
+        st.chat_message("user").write(question)
+        related_documents = retrieve_docs(question)
+        answer = answer_question(question, related_documents)
+        st.chat_message("assistant").write(answer)
